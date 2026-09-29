@@ -54,7 +54,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const profile = await loadProfile(data.user.id);
     if (!profile?.active) {
       await supabase.auth.signOut();
-      throw new Error('Usuario inactivo. Contacte al administrador.');
+      throw new Error('Tu cuenta está pendiente de aprobación o inactiva. Pide a un administrador que la active en Ajustes → Usuarios.');
     }
     set({ session: data.session, profile });
   },

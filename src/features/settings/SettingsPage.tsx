@@ -100,6 +100,9 @@ function BusinessTab() {
         <Field label="Plazo de crédito por defecto (días)">
           <Input inputMode="numeric" value={String(f.default_credit_days ?? '')} onChange={(e) => setF({ ...f, default_credit_days: Number(e.target.value) || 0 })} />
         </Field>
+        <Field label="Descuento máximo del cajero (%)" hint="Rebaja total sobre precio de lista. Más allá, solo un administrador puede cobrar.">
+          <Input inputMode="decimal" value={String(f.max_discount_pct ?? '')} onChange={(e) => setF({ ...f, max_discount_pct: Math.min(100, Math.max(0, parseDecimal(e.target.value))) })} />
+        </Field>
         <Field label="Webhook WhatsApp (opcional)" hint="Edge Function o n8n que consume notification_outbox">
           <Input {...txt('whatsapp_webhook_url')} placeholder="https://…" />
         </Field>
@@ -370,6 +373,8 @@ function UsersTab() {
     },
   });
 
+  const pendingCount = users.filter((u) => !u.active).length;
+
   const update = async (id: string, patch: Partial<Profile>) => {
     const { error } = await supabase.from('profiles').update(patch).eq('id', id);
     if (error) return toast.error(friendlyError(error));
@@ -382,8 +387,14 @@ function UsersTab() {
       <CardHeader>
         <CardTitle>Usuarios y roles</CardTitle>
         <CardDescription>
-          Cree las cuentas en Supabase &gt; Authentication &gt; Users (o por invitación). Aquí asigne el rol: el cajero solo registra ventas; el carnicero, despiece y lotes.
+          Cree las cuentas en Supabase &gt; Authentication &gt; Users (o por invitación). Toda cuenta nueva queda <b>pendiente</b> hasta
+          que la active aquí. Asigne el rol: el cajero solo registra ventas; el carnicero, despiece y lotes.
         </CardDescription>
+        {pendingCount > 0 && (
+          <p className="mt-2 rounded-lg bg-bone/20 p-2 text-sm font-semibold text-bone-dark dark:text-bone">
+            {pendingCount === 1 ? 'Hay 1 usuario pendiente de aprobación.' : `Hay ${pendingCount} usuarios pendientes de aprobación.`}
+          </p>
+        )}
       </CardHeader>
       <CardContent>
         <ul className="divide-y">
@@ -396,6 +407,7 @@ function UsersTab() {
               <label className="flex items-center gap-2 text-sm">
                 <input type="checkbox" disabled={u.id === me} checked={u.active} onChange={(e) => void update(u.id, { active: e.target.checked })} className="size-4" /> Activo
               </label>
+              {!u.active && <Badge tone="warning">Pendiente / inactivo</Badge>}
             </li>
           ))}
         </ul>

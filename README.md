@@ -5,7 +5,8 @@ Sistema offline-first de punto de venta por peso, despiece con análisis de rend
 ## Puesta en marcha
 
 1. **Base de datos**: en Supabase → SQL Editor, ejecuta completo `supabase/schema.sql`. Es re-ejecutable.
-2. **Primer usuario**: crea un usuario en Authentication → Users. El primero queda como **administrador**; los siguientes como cajero (cámbialos en *Ajustes → Usuarios*).
+2. **Primer usuario**: crea un usuario en Authentication → Users. El primero queda como **administrador**; los siguientes se crean como cajero **inactivo** y no pueden entrar hasta que el admin los active en *Ajustes → Usuarios*.
+   **Importante:** desactiva el registro público en Authentication → Sign In / Providers → *Allow new users to sign up*.
 3. **Variables**: copia `.env.example` a `.env.local` y completa `VITE_SUPABASE_URL` y `VITE_SUPABASE_ANON_KEY`.
 4. **Ejecutar**:
    ```bash
@@ -64,10 +65,18 @@ pack-project.js                  Empaquetador ZIP
 | Rendimiento = Σ kg comerciales / kg gancho × 100; costo prorrateado por kg × factor de valor | RPC `process_carcass` y `lib/yield.ts` |
 | Cajero solo inserta ventas y ve las propias; admin acceso total; carnicero despiece/lotes | Políticas RLS |
 | Anulación revierte lotes, stock y cuenta corriente | RPC `void_sale` (solo admin) |
+| Ventas, ítems y pagos solo se crean vía `create_sale` (sin INSERT directo por la API) | Políticas RLS |
+| Rebaja total de un no-admin (precio de línea + descuento) ≤ `max_discount_pct` del precio de catálogo | RPC `create_sale` |
+| Abonos idempotentes por `client_uuid` (un reintento offline no duplica el pago) | RPC `register_customer_payment` |
+| Un turno abierto por caja; efectivo esperado = fondo + efectivo de ventas y abonos + ingresos − retiros | RPC `open_cash_session`, `cash_session_summary`, `close_cash_session` |
 
 ## Balanzas soportadas
 
 Preconfiguradas en *Ajustes → Dispositivos*: CAS y Systel (modo continuo), Torrey (`P`), Toledo (`ENQ`, 7E1, gramos) y Kretz (`W\r`). Cualquier otra que envíe peso en ASCII funciona ajustando baudios, paridad, comando y unidad. La estabilidad se toma del indicador ST/US de la trama o, si no existe, de una ventana deslizante de lecturas.
+
+## Arqueo de caja
+
+En *Arqueo* el cajero abre el turno con el fondo inicial, registra retiros o ingresos de efectivo y, al terminar, ingresa el efectivo contado. El sistema calcula el esperado y muestra el faltante o sobrante. Mientras la caja esté cerrada (confirmado por el servidor) el POS no permite cobrar; sin conexión sí deja vender y esas ventas se suman al turno según su hora real al sincronizar.
 
 ## Offline
 

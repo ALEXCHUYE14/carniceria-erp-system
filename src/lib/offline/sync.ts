@@ -21,6 +21,7 @@ export interface CustomerPaymentPayload {
   method: 'efectivo' | 'yape' | 'plin' | 'tarjeta';
   operation_number: string | null;
   note: string | null;
+  terminal_id: string | null;
 }
 
 export async function enqueueSale(payload: SalePayload): Promise<OutboxEntry> {
@@ -68,6 +69,9 @@ async function pushEntry(entry: OutboxEntry): Promise<unknown> {
     p_method: p.method,
     p_operation_number: p.operation_number,
     p_note: p.note,
+    p_client_uuid: p.client_uuid, // idempotente: un reintento no duplica el abono
+    p_terminal_id: p.terminal_id,
+    p_occurred_at: entry.created_at,
   });
   if (error) throw error;
   return data;

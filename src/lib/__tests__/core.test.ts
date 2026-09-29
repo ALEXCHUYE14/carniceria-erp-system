@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { computeTotals, grossKgForNet, lineTotal, paymentSummary, shrinkKg, validatePayments } from '../pricing';
+import { computeTotals, grossKgForNet, lineTotal, maxDiscountAmount, paymentSummary, shrinkKg, validateDiscount, validatePayments } from '../pricing';
 import { computeYield } from '../yield';
 import { decodeCommand, FrameBuffer, parseScaleFrame, StabilityDetector } from '../hardware/scaleParser';
 import type { CartLine } from '@/types';
@@ -37,6 +37,15 @@ describe('pricing (mismo algoritmo que create_sale en SQL)', () => {
     expect(validatePayments(10, [{ method: 'yape', amount: 10 }], false)).toMatch(/operación/);
     expect(validatePayments(10, [{ method: 'credito', amount: 10 }], false)).toMatch(/cliente/);
     expect(validatePayments(10, [{ method: 'efectivo', amount: 10, tendered: 20 }], false)).toBeNull();
+  });
+
+  it('tope de descuento para no-admin (igual que create_sale)', () => {
+    expect(maxDiscountAmount(235.5, 10)).toBe(23.55);
+    expect(validateDiscount(235.5, 23.55, 10, false)).toBeNull();
+    expect(validateDiscount(235.5, 23.6, 10, false)).toMatch(/máximo/);
+    expect(validateDiscount(235.5, 200, 10, true)).toBeNull();
+    // configuración sin migrar: el cliente no bloquea, decide el servidor
+    expect(validateDiscount(100, 50, undefined, false)).toBeNull();
   });
 });
 

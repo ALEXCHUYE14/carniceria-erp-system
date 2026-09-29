@@ -1,7 +1,8 @@
 import { lazy, Suspense, useCallback, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { AnimatePresence, motion } from 'framer-motion';
-import { AlertTriangle, Beef, Loader2, ScanLine, Search, ShoppingCart } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { AlertTriangle, Beef, Loader2, Lock, ScanLine, Search, ShoppingCart } from 'lucide-react';
 import { toast } from 'sonner';
 import { useCategories, useProducts, useSettings } from '@/hooks/useCatalog';
 import { useCartStore } from '@/stores/cartStore';
@@ -11,7 +12,7 @@ import { ScaleDisplay } from '@/components/ScaleDisplay';
 import { Input } from '@/components/ui/primitives';
 import { Button } from '@/components/ui/button';
 import { CustomerPicker } from '@/features/customers/CustomerPicker';
-import { computeTotals } from '@/lib/pricing';
+import { computeTotals, validateDiscount } from '@/lib/pricing';
 import { cn, formatKg, formatMoney } from '@/lib/utils';
 import type { CartLine, PaymentDraft, Product } from '@/types';
 import type { TicketData } from '@/lib/hardware/escpos';
@@ -20,6 +21,7 @@ import { TicketPanel } from './TicketPanel';
 import { PaymentDialog } from './PaymentDialog';
 import { ReceiptDialog } from './ReceiptDialog';
 import { performCheckout, printTicket } from './checkout';
+import { useCurrentCashSession } from '@/features/cash/useCashSession';
 
 const CameraScanner = lazy(() => import('@/components/CameraScanner').then((m) => ({ default: m.CameraScanner })));
 
@@ -35,6 +37,10 @@ export function PosPage() {
   const cart = useCartStore();
   const profile = useAuthStore((s) => s.profile);
   const { terminalId, printer, autoPrint } = useDeviceStore();
+  const navigate = useNavigate();
+  const { data: cash } = useCurrentCashSession(terminalId);
+  // Solo se bloquea si el servidor confirmó que no hay turno; sin red se permite vender offline
+  const cashClosed = !!cash?.verified && !cash.session;
 
   const [categoryId, setCategoryId] = useState<string | 'all'>('all');
   const [search, setSearch] = useState('');
@@ -131,6 +137,20 @@ export function PosPage() {
 
   const symbol = settings.currency_symbol;
   const totals = computeTotals(cart.lines, cart.discount, settings.tax_rate, settings.prices_include_tax);
+  const startCharge = () => {
+    if (cashClosed) {
+      toast.error('La caja está cerrada. Abre el turno antes de cobrar.', {
+        action: { label: 'Abrir caja', onClick: () => navigate('/arqueo') },
+      });
+      return;
+    }
+    const discountError = validateDiscount(totals.gross, cart.discount, settings.max_discount_pct, profile?.role === 'admin');
+    if (discountError) {
+      toast.error(discountError, { duration: 8000 });
+      return;
+    }
+    setPaying(true);
+  };
   const editingProduct = editingLine ? (products.find((p) => p.id === editingLine.product_id) ?? null) : null;
 
   return (
@@ -146,6 +166,15 @@ export function PosPage() {
       {/* Col 2: Productos */}
       <section className="flex min-w-0 flex-1 flex-col">
         <div className="space-y-2 border-b p-3">
+          {cashClosed && (
+            <button
+              onClick={() => navigate('/arqueo')}
+              className="flex w-full items-center gap-2 rounded-lg bg-bone/20 px-3 py-2 text-left text-sm font-semibold text-bone-dark dark:text-bone"
+            >
+              <Lock className="size-4 shrink-0" />
+              Caja {terminalId} cerrada: abre el turno para poder cobrar →
+            </button>
+          )}
           <div className="flex gap-2">
             <div className="relative flex-1">
               <Search className="absolute left-3 top-3.5 size-5 text-muted-foreground" />
@@ -209,7 +238,7 @@ export function PosPage() {
           setWeighing(null);
         }}
         onPickCustomer={() => setPickCustomer(true)}
-        onCharge={() => setPaying(true)}
+        onCharge={startCharge}
       />
 
       {/* Botón flotante de ticket en móvil */}
@@ -250,7 +279,7 @@ export function PosPage() {
                 setWeighing(null);
               }}
               onPickCustomer={() => setPickCustomer(true)}
-              onCharge={() => setPaying(true)}
+              onCharge={startCharge}
             />
           </motion.div>
         )}

@@ -52,7 +52,7 @@ export function useSettings() {
       try {
         const { data, error } = await supabase.from('business_settings').select('*').eq('id', 1).single();
         if (error) throw error;
-        const s = numeric(data as BusinessSettings, ['tax_rate']);
+        const s = numeric(data as BusinessSettings, ['tax_rate', 'max_discount_pct']);
         await cacheSettings(s);
         return s;
       } catch (err) {

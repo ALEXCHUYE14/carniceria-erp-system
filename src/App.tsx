@@ -16,6 +16,7 @@ const CustomersPage = lazy(() => import('@/features/customers/CustomersPage').th
 const SalesPage = lazy(() => import('@/features/sales/SalesPage').then((m) => ({ default: m.SalesPage })));
 const DashboardPage = lazy(() => import('@/features/dashboard/DashboardPage').then((m) => ({ default: m.DashboardPage })));
 const SettingsPage = lazy(() => import('@/features/settings/SettingsPage').then((m) => ({ default: m.SettingsPage })));
+const CashPage = lazy(() => import('@/features/cash/CashPage').then((m) => ({ default: m.CashPage })));
 const ProductsPage = lazy(() => import('@/features/products/ProductsPage').then((m) => ({ default: m.ProductsPage })));
 import type { UserRole } from '@/types';
 import { homeFor } from '@/lib/roles';
@@ -75,6 +76,7 @@ export default function App() {
             }
           >
             <Route path="/pos" element={<Protected roles={['admin', 'cajero']}><PosPage /></Protected>} />
+            <Route path="/arqueo" element={<Protected roles={['admin', 'cajero']}><CashPage /></Protected>} />
             <Route path="/ventas" element={<Protected roles={['admin', 'cajero']}><SalesPage /></Protected>} />
             <Route path="/clientes" element={<Protected roles={['admin', 'cajero']}><CustomersPage /></Protected>} />
             <Route path="/despiece" element={<Protected roles={['admin', 'carnicero']}><YieldPage /></Protected>} />

@@ -8,6 +8,7 @@ import { Dialog } from '@/components/ui/dialog';
 import { NumericKeypad } from '@/components/ui/keypad';
 import { queryKeys, useCustomers, useSettings } from '@/hooks/useCatalog';
 import { useAuthStore } from '@/stores/authStore';
+import { useDeviceStore } from '@/stores/deviceStore';
 import { enqueueCustomerPayment, syncOutbox } from '@/lib/offline/sync';
 import { friendlyError, isNetworkError, supabase } from '@/lib/supabase';
 import { cn, daysUntil, formatDate, formatMoney, parseDecimal, uuid } from '@/lib/utils';
@@ -226,16 +227,24 @@ function PaymentForm({ open, onOpenChange, customer, symbol, tradeName, onDone }
   const [method, setMethod] = useState<'efectivo' | 'yape' | 'plin' | 'tarjeta'>('efectivo');
   const [op, setOp] = useState('');
   const [busy, setBusy] = useState(false);
+  // Se conserva entre reintentos del mismo abono: si la respuesta se pierde y el cajero vuelve a
+  // confirmar, el servidor reconoce el client_uuid y no lo registra dos veces.
+  const [clientUuid, setClientUuid] = useState(uuid);
+  const terminalId = useDeviceStore((s) => s.terminalId);
   const value = parseDecimal(amount);
 
   const submit = async () => {
     if (value <= 0 || value > customer.balance) return toast.error('Monto inválido o mayor al saldo');
     if ((method === 'yape' || method === 'plin') && op.trim().length < 4) return toast.error('Ingrese el N° de operación');
     setBusy(true);
-    const payload = { client_uuid: uuid(), customer_id: customer.id, amount: value, method, operation_number: op.trim() || null, note: null };
+    const payload = {
+      client_uuid: clientUuid, customer_id: customer.id, amount: value, method,
+      operation_number: op.trim() || null, note: null, terminal_id: terminalId || null,
+    };
     try {
       const { data, error } = await supabase.rpc('register_customer_payment', {
         p_customer_id: customer.id, p_amount: value, p_method: method, p_operation_number: payload.operation_number, p_note: null,
+        p_client_uuid: clientUuid, p_terminal_id: payload.terminal_id,
       });
       if (error) throw error;
       const newBalance = Number((data as { new_balance: number }).new_balance);
@@ -256,10 +265,12 @@ function PaymentForm({ open, onOpenChange, customer, symbol, tradeName, onDone }
       onOpenChange(false);
       setAmount('');
       setOp('');
+      setClientUuid(uuid());
       onDone();
     } catch (e) {
       if (isNetworkError(e)) {
         await enqueueCustomerPayment(payload);
+        setClientUuid(uuid());
         void syncOutbox();
         toast.warning('Sin conexión: el abono se registrará al recuperar la señal');
         onOpenChange(false);

@@ -71,3 +71,20 @@ export function validatePayments(total: number, payments: PaymentDraft[], hasCus
   if (round(nonCash, 2) > total) return 'Los pagos electrónicos/crédito no pueden exceder el total (no dan vuelto).';
   return null;
 }
+
+/** Descuento máximo (monto) que puede aplicar un no-admin: mismo tope que valida create_sale. */
+export function maxDiscountAmount(gross: number, maxPct: number | null | undefined): number {
+  // Configuración cacheada de antes de la migración: sin tope en el cliente (el servidor decide)
+  if (maxPct === null || maxPct === undefined || !Number.isFinite(maxPct)) return gross;
+  return round(gross * (Math.min(Math.max(maxPct, 0), 100) / 100), 2);
+}
+
+export function validateDiscount(gross: number, discount: number, maxPct: number | null | undefined, isAdmin: boolean): string | null {
+  if (discount < 0) return 'El descuento no puede ser negativo.';
+  if (isAdmin) return null;
+  const max = maxDiscountAmount(gross, maxPct);
+  if (discount > max + 0.005) {
+    return `El descuento supera el máximo permitido (${maxPct}% = ${max.toFixed(2)}). Requiere un administrador.`;
+  }
+  return null;
+}

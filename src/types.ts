@@ -35,6 +35,8 @@ export interface BusinessSettings {
   allow_negative_stock: boolean;
   default_credit_days: number;
   whatsapp_webhook_url: string | null;
+  /** Rebaja máxima (%) sobre precio de catálogo que puede aplicar un no-admin. */
+  max_discount_pct: number;
   updated_at: string;
 }
 
@@ -222,6 +224,57 @@ export interface CarcassYieldView {
   status: CarcassStatus;
   processed_at: string | null;
   real_cost_per_commercial_kg: number | null;
+}
+
+// ---------------------------------------------------------------------
+// Caja (turnos y arqueo)
+// ---------------------------------------------------------------------
+export type CashSessionStatus = 'abierta' | 'cerrada';
+export type CashMovementKind = 'ingreso' | 'egreso';
+
+export interface CashSession {
+  id: string;
+  terminal_id: string;
+  status: CashSessionStatus;
+  opened_by: string;
+  opened_at: string;
+  opening_amount: number;
+  closed_by: string | null;
+  closed_at: string | null;
+  expected_cash: number | null;
+  counted_cash: number | null;
+  difference: number | null;
+  summary: CashSummary | null;
+  notes: string | null;
+}
+
+export interface CashMovement {
+  id: string;
+  session_id: string;
+  kind: CashMovementKind;
+  amount: number;
+  reason: string;
+  created_by: string | null;
+  created_at: string;
+}
+
+/** Resultado de la RPC cash_session_summary (y foto guardada al cerrar). */
+export interface CashSummary {
+  session_id: string;
+  terminal_id: string;
+  opened_at: string;
+  closed_at: string | null;
+  opening_amount: number;
+  sales_by_method: Partial<Record<PaymentMethod, number>>;
+  abonos_by_method: Partial<Record<PaymentMethod, number>>;
+  sales_count: number;
+  sales_total: number;
+  voided_count: number;
+  cash_in: number;
+  cash_out: number;
+  expected_cash: number;
+  counted_cash?: number;
+  difference?: number;
 }
 
 // ---------------------------------------------------------------------

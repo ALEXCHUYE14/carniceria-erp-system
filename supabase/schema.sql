@@ -63,9 +63,15 @@ create table if not exists public.business_settings (
   allow_negative_stock  boolean     not null default false,
   default_credit_days   integer     not null default 15 check (default_credit_days >= 0),
   whatsapp_webhook_url  text,                               -- endpoint externo para comprobantes
+  max_discount_pct      numeric(5,2) not null default 10 check (max_discount_pct >= 0 and max_discount_pct <= 100), -- tope de rebaja para no-admin
   updated_at            timestamptz not null default now(),
   updated_by            uuid
 );
+
+-- Migración de instalaciones previas
+alter table public.business_settings
+  add column if not exists max_discount_pct numeric(5,2) not null default 10
+  check (max_discount_pct >= 0 and max_discount_pct <= 100);
 
 insert into public.business_settings (id) values (1) on conflict (id) do nothing;
 
@@ -282,9 +288,17 @@ create table if not exists public.payment_transactions (
   verified_by        uuid references public.profiles(id),
   verified_at        timestamptz,
   received_by        uuid references public.profiles(id) default auth.uid(),
+  client_uuid        uuid,                                    -- idempotencia de abonos offline
+  terminal_id        text,                                    -- caja que recibió el dinero (arqueo)
+  occurred_at        timestamptz not null default now(),      -- hora real del cobro (offline incluido)
   created_at         timestamptz not null default now(),
   check (method not in ('yape', 'plin') or coalesce(length(trim(operation_number)), 0) >= 4)
 );
+
+-- Migración de instalaciones previas
+alter table public.payment_transactions add column if not exists client_uuid uuid;
+alter table public.payment_transactions add column if not exists terminal_id text;
+alter table public.payment_transactions add column if not exists occurred_at timestamptz not null default now();
 
 create table if not exists public.customer_ledger (
   id                 uuid primary key default gen_random_uuid(),
@@ -326,6 +340,34 @@ create table if not exists public.stock_movements (
   created_at         timestamptz not null default now()
 );
 
+-- Turnos de caja (apertura / arqueo / cierre). Se escriben solo vía RPC.
+create table if not exists public.cash_sessions (
+  id                 uuid primary key default gen_random_uuid(),
+  terminal_id        text        not null,
+  status             text        not null default 'abierta' check (status in ('abierta', 'cerrada')),
+  opened_by          uuid        not null references public.profiles(id) default auth.uid(),
+  opened_at          timestamptz not null default now(),
+  opening_amount     numeric(12,2) not null default 0 check (opening_amount >= 0),
+  closed_by          uuid references public.profiles(id),
+  closed_at          timestamptz,
+  expected_cash      numeric(12,2),
+  counted_cash       numeric(12,2),
+  difference         numeric(12,2),                           -- contado - esperado (negativo = faltante)
+  summary            jsonb,                                   -- foto del resumen al cerrar
+  notes              text
+);
+
+-- Ingresos / retiros de efectivo durante el turno (sencillo, pago a proveedor, gastos)
+create table if not exists public.cash_movements (
+  id                 uuid primary key default gen_random_uuid(),
+  session_id         uuid        not null references public.cash_sessions(id) on delete cascade,
+  kind               text        not null check (kind in ('ingreso', 'egreso')),
+  amount             numeric(12,2) not null check (amount > 0),
+  reason             text        not null,
+  created_by         uuid references public.profiles(id) default auth.uid(),
+  created_at         timestamptz not null default now()
+);
+
 -- ---------------------------------------------------------------------
 -- 8. ÍNDICES
 -- ---------------------------------------------------------------------
@@ -353,6 +395,20 @@ create index if not exists idx_ledger_customer_date    on public.customer_ledger
 create index if not exists idx_customers_name          on public.customers using btree (full_name);
 create index if not exists idx_stock_mov_product_date  on public.stock_movements using btree (product_id, created_at);
 create index if not exists idx_outbox_status           on public.notification_outbox using btree (status, created_at);
+create index if not exists idx_payments_terminal_time  on public.payment_transactions using btree (terminal_id, occurred_at);
+create index if not exists idx_sales_terminal_date     on public.sales using btree (terminal_id, created_at);
+create index if not exists idx_cash_sessions_opened    on public.cash_sessions using btree (opened_at desc);
+create index if not exists idx_cash_movements_session  on public.cash_movements using btree (session_id);
+
+-- Un abono reintentado desde la cola offline no se registra dos veces
+create unique index if not exists uq_payments_client_uuid
+  on public.payment_transactions (client_uuid)
+  where client_uuid is not null;
+
+-- Solo un turno abierto por caja
+create unique index if not exists uq_cash_session_open
+  on public.cash_sessions (terminal_id)
+  where status = 'abierta';
 
 -- Evita reutilizar el mismo nro de operación Yape/Plin en pagos distintos (anti-fraude)
 create unique index if not exists uq_wallet_operation
@@ -390,21 +446,20 @@ as $$
   select coalesce((select role = any(roles) from public.profiles where id = auth.uid() and active = true), false);
 $$;
 
--- Perfil automático al registrarse. El primer usuario del sistema es admin.
+-- Perfil automático al registrarse. El primer usuario del sistema es admin activo;
+-- los siguientes quedan INACTIVOS hasta que un admin los apruebe en Ajustes > Usuarios.
 create or replace function public.handle_new_user()
 returns trigger
 language plpgsql security definer set search_path = public
 as $$
 declare
-  v_role public.user_role;
+  v_first boolean;
 begin
-  if not exists (select 1 from public.profiles) then
-    v_role := 'admin';
-  else
-    v_role := 'cajero';
-  end if;
-  insert into public.profiles (id, full_name, role)
-  values (new.id, coalesce(new.raw_user_meta_data->>'full_name', split_part(new.email, '@', 1)), v_role)
+  v_first := not exists (select 1 from public.profiles);
+  insert into public.profiles (id, full_name, role, active)
+  values (new.id, coalesce(new.raw_user_meta_data->>'full_name', split_part(new.email, '@', 1)),
+          case when v_first then 'admin'::public.user_role else 'cajero'::public.user_role end,
+          v_first)
   on conflict (id) do nothing;
   return new;
 end;
@@ -674,6 +729,10 @@ declare
   v_subtotal    numeric(12,2);
   v_tax         numeric(12,2);
   v_pay_id      uuid;
+  v_list_gross  numeric(12,2) := 0;   -- importe a precio de catálogo (referencia para el tope de descuento)
+  v_reduction   numeric(12,2);
+  v_max_reduce  numeric(12,2);
+  v_paid_at     timestamptz := coalesce(nullif(payload->>'offline_created_at', '')::timestamptz, now());
 begin
   if not public.has_role(array['admin', 'cajero']::public.user_role[]) then
     raise exception 'No autorizado para registrar ventas' using errcode = '42501';
@@ -729,6 +788,7 @@ begin
     end if;
 
     v_line := round(v_qty * coalesce((v_item->>'unit_price')::numeric, v_prod.price_per_unit), 2) + v_surcharge;
+    v_list_gross := v_list_gross + round(v_qty * v_prod.price_per_unit, 2) + v_surcharge;
 
     insert into public.sale_items (sale_id, product_id, lot_id, cut_type_id, quantity, shrink_kg,
                                    unit_price, surcharge, unit_cost, line_total, weight_source)
@@ -740,6 +800,19 @@ begin
   end loop;
 
   v_total := greatest(v_gross - v_discount, 0);
+
+  -- Tope de rebaja para no-admin: precio rebajado en línea + descuento global, contra el precio de
+  -- catálogo. Cubre también ventas offline con precio desactualizado; si exceden el tope quedan
+  -- en "Operaciones pendientes" y un admin puede reintentarlas.
+  if not public.is_admin() then
+    v_reduction := v_list_gross - v_total;
+    v_max_reduce := round(v_list_gross * coalesce(v_settings.max_discount_pct, 0) / 100.0, 2);
+    if v_reduction > v_max_reduce + 0.01 then
+      raise exception 'Descuento de % supera el máximo permitido de % (% %%). Requiere autorización de un administrador.',
+        v_reduction, v_max_reduce, v_settings.max_discount_pct
+        using errcode = 'P0001';
+    end if;
+  end if;
 
   if v_settings.prices_include_tax then
     v_subtotal := round(v_total / (1 + v_settings.tax_rate / 100.0), 2);
@@ -757,7 +830,8 @@ begin
   loop
     if (v_pay->>'amount')::numeric <= 0 then continue; end if;
 
-    insert into public.payment_transactions (sale_id, customer_id, method, amount, tendered, change_given, operation_number)
+    insert into public.payment_transactions (sale_id, customer_id, method, amount, tendered, change_given, operation_number,
+                                             terminal_id, occurred_at)
     values (v_sale_id,
             nullif(payload->>'customer_id', '')::uuid,
             (v_pay->>'method')::public.payment_method,
@@ -765,7 +839,9 @@ begin
             nullif(v_pay->>'tendered', '')::numeric,
             case when v_pay->>'tendered' is not null
                  then greatest((v_pay->>'tendered')::numeric - (v_pay->>'amount')::numeric, 0) end,
-            nullif(trim(v_pay->>'operation_number'), ''))
+            nullif(trim(v_pay->>'operation_number'), ''),
+            payload->>'terminal_id',
+            v_paid_at)
     returning id into v_pay_id;
 
     if v_pay->>'method' = 'credito' then
@@ -859,9 +935,15 @@ $$;
 -- ---------------------------------------------------------------------
 -- 14. RPC: REGISTRAR ABONO DE CLIENTE (+ comprobante WhatsApp en cola)
 -- ---------------------------------------------------------------------
+-- Firma anterior (sin idempotencia): se elimina para no dejar una sobrecarga activa
+drop function if exists public.register_customer_payment(uuid, numeric, public.payment_method, text, text);
+
 create or replace function public.register_customer_payment(
   p_customer_id uuid, p_amount numeric, p_method public.payment_method,
-  p_operation_number text default null, p_note text default null)
+  p_operation_number text default null, p_note text default null,
+  p_client_uuid uuid default null,          -- idempotencia: el mismo abono reintentado no se duplica
+  p_terminal_id text default null,          -- caja que recibe el dinero (arqueo)
+  p_occurred_at timestamptz default null)   -- hora real si se registró offline
 returns jsonb
 language plpgsql security definer set search_path = public
 as $$
@@ -872,6 +954,15 @@ begin
   if not public.has_role(array['admin', 'cajero']::public.user_role[]) then
     raise exception 'No autorizado' using errcode = '42501';
   end if;
+
+  if p_client_uuid is not null then
+    select id into v_pay_id from public.payment_transactions where client_uuid = p_client_uuid;
+    if found then
+      select * into v_customer from public.customers where id = p_customer_id;
+      return jsonb_build_object('payment_id', v_pay_id, 'new_balance', v_customer.balance, 'duplicate', true);
+    end if;
+  end if;
+
   if p_amount <= 0 then raise exception 'Monto inválido'; end if;
   if p_method = 'credito' then raise exception 'Un abono no puede ser al crédito'; end if;
 
@@ -881,8 +972,9 @@ begin
     raise exception 'El abono (%) supera el saldo pendiente (%)', p_amount, v_customer.balance;
   end if;
 
-  insert into public.payment_transactions (customer_id, method, amount, operation_number)
-  values (p_customer_id, p_method, p_amount, nullif(trim(p_operation_number), ''))
+  insert into public.payment_transactions (customer_id, method, amount, operation_number, client_uuid, terminal_id, occurred_at)
+  values (p_customer_id, p_method, p_amount, nullif(trim(p_operation_number), ''),
+          p_client_uuid, nullif(trim(p_terminal_id), ''), coalesce(p_occurred_at, now()))
   returning id into v_pay_id;
 
   insert into public.customer_ledger (customer_id, payment_id, entry_type, amount, note)
@@ -897,7 +989,7 @@ begin
                                'metodo', p_method, 'saldo', v_customer.balance, 'fecha', now()));
   end if;
 
-  return jsonb_build_object('payment_id', v_pay_id, 'new_balance', v_customer.balance);
+  return jsonb_build_object('payment_id', v_pay_id, 'new_balance', v_customer.balance, 'duplicate', false);
 end;
 $$;
 
@@ -1034,6 +1126,171 @@ end;
 $$;
 
 -- ---------------------------------------------------------------------
+-- 15b. RPC: TURNOS DE CAJA (apertura, movimientos, arqueo y cierre)
+-- Efectivo esperado = fondo inicial + ventas en efectivo + abonos en efectivo + ingresos - egresos
+-- Se cuentan los pagos de la caja (terminal_id) cuya hora real cae dentro del turno;
+-- las ventas anuladas no suman.
+-- ---------------------------------------------------------------------
+create or replace function public.cash_session_summary(p_session_id uuid)
+returns jsonb
+language plpgsql stable security definer set search_path = public
+as $$
+declare
+  v_s        public.cash_sessions%rowtype;
+  v_until    timestamptz;
+  v_sales    jsonb;
+  v_abonos   jsonb;
+  v_count    integer;
+  v_total    numeric(12,2);
+  v_voided   integer;
+  v_in       numeric(12,2);
+  v_out      numeric(12,2);
+begin
+  if not public.has_role(array['admin', 'cajero']::public.user_role[]) then
+    raise exception 'No autorizado' using errcode = '42501';
+  end if;
+
+  select * into v_s from public.cash_sessions where id = p_session_id;
+  if not found then raise exception 'Turno de caja no encontrado'; end if;
+  v_until := coalesce(v_s.closed_at, now());
+
+  select coalesce(jsonb_object_agg(method, total), '{}'::jsonb) into v_sales
+    from (select pt.method, sum(pt.amount) as total
+            from public.payment_transactions pt
+            join public.sales s on s.id = pt.sale_id
+           where pt.terminal_id = v_s.terminal_id
+             and pt.occurred_at >= v_s.opened_at and pt.occurred_at < v_until
+             and s.status = 'completada'
+           group by pt.method) t;
+
+  select coalesce(jsonb_object_agg(method, total), '{}'::jsonb) into v_abonos
+    from (select pt.method, sum(pt.amount) as total
+            from public.payment_transactions pt
+           where pt.sale_id is null
+             and pt.terminal_id = v_s.terminal_id
+             and pt.occurred_at >= v_s.opened_at and pt.occurred_at < v_until
+           group by pt.method) t;
+
+  select count(*) filter (where status = 'completada'),
+         coalesce(sum(total) filter (where status = 'completada'), 0),
+         count(*) filter (where status = 'anulada')
+    into v_count, v_total, v_voided
+    from public.sales
+   where terminal_id = v_s.terminal_id
+     and coalesce(offline_created_at, created_at) >= v_s.opened_at
+     and coalesce(offline_created_at, created_at) < v_until;
+
+  select coalesce(sum(amount) filter (where kind = 'ingreso'), 0),
+         coalesce(sum(amount) filter (where kind = 'egreso'), 0)
+    into v_in, v_out
+    from public.cash_movements where session_id = p_session_id;
+
+  return jsonb_build_object(
+    'session_id', v_s.id,
+    'terminal_id', v_s.terminal_id,
+    'opened_at', v_s.opened_at,
+    'closed_at', v_s.closed_at,
+    'opening_amount', v_s.opening_amount,
+    'sales_by_method', v_sales,
+    'abonos_by_method', v_abonos,
+    'sales_count', v_count,
+    'sales_total', v_total,
+    'voided_count', v_voided,
+    'cash_in', v_in,
+    'cash_out', v_out,
+    'expected_cash', v_s.opening_amount
+                     + coalesce((v_sales->>'efectivo')::numeric, 0)
+                     + coalesce((v_abonos->>'efectivo')::numeric, 0)
+                     + v_in - v_out);
+end;
+$$;
+
+create or replace function public.open_cash_session(p_terminal_id text, p_opening_amount numeric)
+returns jsonb
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_open public.cash_sessions%rowtype;
+begin
+  if not public.has_role(array['admin', 'cajero']::public.user_role[]) then
+    raise exception 'No autorizado' using errcode = '42501';
+  end if;
+  if coalesce(trim(p_terminal_id), '') = '' then raise exception 'Identificador de caja requerido'; end if;
+  if coalesce(p_opening_amount, 0) < 0 then raise exception 'El fondo inicial no puede ser negativo'; end if;
+
+  select * into v_open from public.cash_sessions where terminal_id = trim(p_terminal_id) and status = 'abierta';
+  if found then
+    raise exception 'La caja % ya tiene un turno abierto desde %', v_open.terminal_id,
+      to_char(v_open.opened_at at time zone 'America/Lima', 'DD/MM HH24:MI');
+  end if;
+
+  insert into public.cash_sessions (terminal_id, opening_amount, opened_by)
+  values (trim(p_terminal_id), round(coalesce(p_opening_amount, 0), 2), auth.uid())
+  returning * into v_open;
+  return to_jsonb(v_open);
+end;
+$$;
+
+create or replace function public.add_cash_movement(p_session_id uuid, p_kind text, p_amount numeric, p_reason text)
+returns jsonb
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_row public.cash_movements%rowtype;
+begin
+  if not public.has_role(array['admin', 'cajero']::public.user_role[]) then
+    raise exception 'No autorizado' using errcode = '42501';
+  end if;
+  if not exists (select 1 from public.cash_sessions where id = p_session_id and status = 'abierta') then
+    raise exception 'El turno de caja no está abierto';
+  end if;
+  if coalesce(p_amount, 0) <= 0 then raise exception 'Monto inválido'; end if;
+  if coalesce(trim(p_reason), '') = '' then raise exception 'Indique el motivo del movimiento'; end if;
+
+  insert into public.cash_movements (session_id, kind, amount, reason)
+  values (p_session_id, p_kind, round(p_amount, 2), trim(p_reason))
+  returning * into v_row;
+  return to_jsonb(v_row);
+end;
+$$;
+
+create or replace function public.close_cash_session(p_session_id uuid, p_counted_cash numeric, p_notes text default null)
+returns jsonb
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_s        public.cash_sessions%rowtype;
+  v_summary  jsonb;
+  v_expected numeric(12,2);
+  v_counted  numeric(12,2) := round(coalesce(p_counted_cash, 0), 2);
+begin
+  if not public.has_role(array['admin', 'cajero']::public.user_role[]) then
+    raise exception 'No autorizado' using errcode = '42501';
+  end if;
+  if v_counted < 0 then raise exception 'El efectivo contado no puede ser negativo'; end if;
+
+  select * into v_s from public.cash_sessions where id = p_session_id for update;
+  if not found then raise exception 'Turno de caja no encontrado'; end if;
+  if v_s.status <> 'abierta' then raise exception 'El turno ya fue cerrado'; end if;
+
+  -- now() es la hora de inicio de la transacción: el resumen y closed_at usan el mismo corte
+  v_summary := public.cash_session_summary(p_session_id);
+  v_expected := (v_summary->>'expected_cash')::numeric;
+
+  update public.cash_sessions
+     set status = 'cerrada', closed_at = now(), closed_by = auth.uid(),
+         expected_cash = v_expected, counted_cash = v_counted,
+         difference = v_counted - v_expected,
+         summary = v_summary || jsonb_build_object('closed_at', now()),
+         notes = nullif(trim(p_notes), '')
+   where id = p_session_id;
+
+  return v_summary || jsonb_build_object('closed_at', now(), 'counted_cash', v_counted,
+                                         'difference', v_counted - v_expected);
+end;
+$$;
+
+-- ---------------------------------------------------------------------
 -- 16. VISTAS DE ANÁLISIS (security_invoker para respetar RLS)
 -- ---------------------------------------------------------------------
 create or replace view public.v_carcass_yield with (security_invoker = true) as
@@ -1087,6 +1344,8 @@ alter table public.sale_item_lots       enable row level security;
 alter table public.payment_transactions enable row level security;
 alter table public.notification_outbox  enable row level security;
 alter table public.stock_movements      enable row level security;
+alter table public.cash_sessions        enable row level security;
+alter table public.cash_movements       enable row level security;
 
 -- Limpieza de políticas previas (re-ejecución segura)
 do $$
@@ -1095,7 +1354,8 @@ begin
   for r in select policyname, tablename from pg_policies where schemaname = 'public'
            and tablename in ('business_settings','profiles','categories','products','cut_types','carcasses',
                              'cuts_yield_master','inventory_lots','customers','customer_ledger','sales',
-                             'sale_items','sale_item_lots','payment_transactions','notification_outbox','stock_movements')
+                             'sale_items','sale_item_lots','payment_transactions','notification_outbox','stock_movements',
+                             'cash_sessions','cash_movements')
   loop
     execute format('drop policy if exists %I on public.%I', r.policyname, r.tablename);
   end loop;
@@ -1158,24 +1418,20 @@ create policy ledger_select on public.customer_ledger for select to authenticate
   using (public.has_role(array['admin','cajero']::public.user_role[]));
 create policy ledger_admin on public.customer_ledger for all to authenticated using (public.is_admin()) with check (public.is_admin());
 
--- ventas: cajero SOLO inserta y ve sus propias ventas; admin total
-create policy sales_insert_cashier on public.sales for insert to authenticated
-  with check (public.has_role(array['admin','cajero']::public.user_role[]) and cashier_id = auth.uid());
+-- ventas: se CREAN solo vía RPC create_sale (security definer), que valida precios, descuento,
+-- stock y crédito. Sin políticas de INSERT para cajero: nadie puede insertar ventas, ítems ni
+-- pagos directamente por la API con totales arbitrarios. El cajero ve solo sus ventas; admin total.
 create policy sales_select on public.sales for select to authenticated
   using (public.is_admin() or cashier_id = auth.uid());
 create policy sales_admin_update on public.sales for update to authenticated using (public.is_admin()) with check (public.is_admin());
 create policy sales_admin_delete on public.sales for delete to authenticated using (public.is_admin());
 
-create policy sale_items_insert on public.sale_items for insert to authenticated
-  with check (exists (select 1 from public.sales s where s.id = sale_id and s.cashier_id = auth.uid()));
 create policy sale_items_select on public.sale_items for select to authenticated
   using (public.is_admin() or exists (select 1 from public.sales s where s.id = sale_id and s.cashier_id = auth.uid()));
 create policy sale_items_admin on public.sale_items for all to authenticated using (public.is_admin()) with check (public.is_admin());
 
 create policy sale_item_lots_select on public.sale_item_lots for select to authenticated using (public.is_admin());
 
-create policy payments_insert on public.payment_transactions for insert to authenticated
-  with check (public.has_role(array['admin','cajero']::public.user_role[]) and received_by = auth.uid());
 create policy payments_select on public.payment_transactions for select to authenticated
   using (public.is_admin() or received_by = auth.uid());
 create policy payments_admin on public.payment_transactions for all to authenticated using (public.is_admin()) with check (public.is_admin());
@@ -1183,16 +1439,32 @@ create policy payments_admin on public.payment_transactions for all to authentic
 create policy outbox_admin on public.notification_outbox for all to authenticated using (public.is_admin()) with check (public.is_admin());
 create policy stock_mov_admin on public.stock_movements for select to authenticated using (public.is_admin());
 
+-- caja: se escribe solo vía RPC; el cajero ve los turnos abiertos y los suyos; admin todo
+create policy cash_sessions_select on public.cash_sessions for select to authenticated
+  using (public.is_admin()
+         or (public.has_role(array['cajero']::public.user_role[])
+             and (status = 'abierta' or opened_by = auth.uid() or closed_by = auth.uid())));
+create policy cash_movements_select on public.cash_movements for select to authenticated
+  using (public.has_role(array['admin','cajero']::public.user_role[]));
+
 -- Permisos de ejecución de RPC
 revoke all on function public.create_sale(jsonb) from public, anon;
 revoke all on function public.void_sale(uuid, text) from public, anon;
-revoke all on function public.register_customer_payment(uuid, numeric, public.payment_method, text, text) from public, anon;
+revoke all on function public.register_customer_payment(uuid, numeric, public.payment_method, text, text, uuid, text, timestamptz) from public, anon;
+revoke all on function public.cash_session_summary(uuid) from public, anon;
+revoke all on function public.open_cash_session(text, numeric) from public, anon;
+revoke all on function public.add_cash_movement(uuid, text, numeric, text) from public, anon;
+revoke all on function public.close_cash_session(uuid, numeric, text) from public, anon;
 revoke all on function public.process_carcass(uuid) from public, anon;
 revoke all on function public.expire_lots() from public, anon;
 revoke all on function public.enqueue_overdue_reminders() from public, anon;
 grant execute on function public.create_sale(jsonb) to authenticated;
 grant execute on function public.void_sale(uuid, text) to authenticated;
-grant execute on function public.register_customer_payment(uuid, numeric, public.payment_method, text, text) to authenticated;
+grant execute on function public.register_customer_payment(uuid, numeric, public.payment_method, text, text, uuid, text, timestamptz) to authenticated;
+grant execute on function public.cash_session_summary(uuid) to authenticated;
+grant execute on function public.open_cash_session(text, numeric) to authenticated;
+grant execute on function public.add_cash_movement(uuid, text, numeric, text) to authenticated;
+grant execute on function public.close_cash_session(uuid, numeric, text) to authenticated;
 grant execute on function public.process_carcass(uuid) to authenticated;
 grant execute on function public.expire_lots() to authenticated;
 grant execute on function public.enqueue_overdue_reminders() to authenticated;

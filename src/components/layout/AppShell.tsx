@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import {
-  BarChart3, Beef, Boxes, Cloud, CloudOff, LogOut, Moon, Package, Receipt, RefreshCw, Scale, Settings, ShoppingCart, Sun, Users,
+  BarChart3, Beef, Boxes, Cloud, CloudOff, LogOut, Moon, Package, Receipt, RefreshCw, Scale, Settings, ShoppingCart, Sun, Users, Wallet,
 } from 'lucide-react';
 import { useAuthStore } from '@/stores/authStore';
 import { useSyncStore } from '@/stores/syncStore';
@@ -24,6 +24,7 @@ interface NavItem {
 
 const NAV: NavItem[] = [
   { to: '/pos', label: 'Caja', icon: ShoppingCart, roles: ['admin', 'cajero'], industrial: true },
+  { to: '/arqueo', label: 'Arqueo', icon: Wallet, roles: ['admin', 'cajero'] },
   { to: '/despiece', label: 'Despiece', icon: Beef, roles: ['admin', 'carnicero'], industrial: true },
   { to: '/lotes', label: 'Lotes', icon: Boxes, roles: ['admin', 'cajero', 'carnicero'] },
   { to: '/clientes', label: 'Clientes', icon: Users, roles: ['admin', 'cajero'] },
@@ -109,7 +110,7 @@ export function AppShell() {
           <Outlet />
         </main>
         {/* Navegación inferior móvil */}
-        <nav className="pb-safe grid shrink-0 border-t bg-card md:hidden" style={{ gridTemplateColumns: `repeat(${Math.min(items.length, 5)}, minmax(0, 1fr))` }}>
+        <nav className="pb-safe scrollbar-thin flex shrink-0 overflow-x-auto border-t bg-card md:hidden">
           {items.map((item) => (
             <NavLink
               key={item.to}
