@@ -1,0 +1,89 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /* Modo claro comercial (administración) */
+  :root {
+    --background: 210 40% 98%;          /* #F8FAFC */
+    --foreground: 222 47% 11%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+    --muted: 214 32% 93%;
+    --muted-foreground: 215 16% 42%;
+    --border: 214 32% 88%;
+    --input: 214 32% 84%;
+    --primary: 351 68% 17%;             /* #4A0E17 burdeos */
+    --primary-foreground: 0 0% 100%;
+    --destructive: 0 72% 51%;           /* #DC2626 */
+    --destructive-foreground: 0 0% 100%;
+    --ring: 0 72% 51%;
+  }
+
+  /* Modo oscuro industrial (POS / balanza) */
+  .dark {
+    --background: 222 47% 11%;          /* #0F172A */
+    --foreground: 210 40% 98%;
+    --card: 222 40% 15%;
+    --card-foreground: 210 40% 98%;
+    --muted: 217 33% 20%;
+    --muted-foreground: 215 20% 68%;
+    --border: 217 33% 24%;
+    --input: 217 33% 28%;
+    --primary: 0 72% 51%;               /* rojo carne fresca para contraste en oscuro */
+    --primary-foreground: 0 0% 100%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --ring: 38 92% 50%;                 /* foco dorado #F59E0B */
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: 'cv11', 'ss01';
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior: none;
+  }
+
+  input[type='number']::-webkit-inner-spin-button,
+  input[type='number']::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+}
+
+@layer components {
+  .data-table {
+    @apply w-full border-collapse text-sm;
+  }
+  .data-table th {
+    @apply sticky top-0 z-10 bg-muted px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-muted-foreground;
+  }
+  .data-table td {
+    @apply border-t px-3 py-2 tabular-nums;
+  }
+  .data-table tbody tr:hover {
+    @apply bg-muted/50;
+  }
+  .scale-digits {
+    @apply font-mono font-bold tabular-nums tracking-tight;
+  }
+}
+
+@layer utilities {
+  .scrollbar-thin {
+    scrollbar-width: thin;
+  }
+  .pb-safe {
+    padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
+  }
+}

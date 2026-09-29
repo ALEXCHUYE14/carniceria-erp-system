@@ -1,0 +1,57 @@
+{
+  "name": "carniceria-erp-system",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "ERP/POS offline-first para carnicerías: venta por peso, despiece, trazabilidad FIFO y cuentas corrientes.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -b --noEmit",
+    "test": "vitest run",
+    "pack": "node pack-project.js"
+  },
+  "dependencies": {
+    "@radix-ui/react-dialog": "^1.1.14",
+    "@radix-ui/react-tabs": "^1.1.12",
+    "@supabase/supabase-js": "^2.50.0",
+    "@tanstack/react-query": "^5.80.0",
+    "@zxing/browser": "^0.1.5",
+    "@zxing/library": "^0.21.3",
+    "browser-image-compression": "^2.0.2",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "dexie": "^4.0.11",
+    "dexie-react-hooks": "^1.1.7",
+    "framer-motion": "^12.18.1",
+    "lucide-react": "^0.515.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-router-dom": "^7.18.4",
+    "recharts": "^3.0.0",
+    "sonner": "^2.0.5",
+    "tailwind-merge": "^3.3.1",
+    "zustand": "^5.0.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@types/w3c-web-serial": "^1.0.8",
+    "@types/w3c-web-usb": "^1.0.10",
+    "@types/web-bluetooth": "^0.0.21",
+    "@vitejs/plugin-react": "^4.5.2",
+    "archiver": "^7.0.1",
+    "autoprefixer": "^10.4.21",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^3.4.17",
+    "typescript": "~5.8.3",
+    "vite": "^6.3.5",
+    "vite-plugin-pwa": "^1.0.0",
+    "vitest": "^5.0.2"
+  },
+  "allowScripts": {
+    "esbuild@0.25.12": true
+  }
+}
